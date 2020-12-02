@@ -1445,6 +1445,7 @@ static void rd_kafka_txn_handle_TxnOffsetCommit (rd_kafka_t *rk,
 
         case RD_KAFKA_RESP_ERR_NOT_COORDINATOR:
         case RD_KAFKA_RESP_ERR_COORDINATOR_NOT_AVAILABLE:
+        case RD_KAFKA_RESP_ERR_REQUEST_TIMED_OUT:
         case RD_KAFKA_RESP_ERR__TRANSPORT:
         case RD_KAFKA_RESP_ERR__TIMED_OUT:
         case RD_KAFKA_RESP_ERR__TIMED_OUT_QUEUE:
@@ -1471,6 +1472,12 @@ static void rd_kafka_txn_handle_TxnOffsetCommit (rd_kafka_t *rk,
 
         case RD_KAFKA_RESP_ERR_TOPIC_AUTHORIZATION_FAILED:
         case RD_KAFKA_RESP_ERR_GROUP_AUTHORIZATION_FAILED:
+                actions |= RD_KAFKA_ERR_ACTION_PERMANENT;
+                break;
+
+        case RD_KAFKA_RESP_ERR_ILLEGAL_GENERATION:
+        case RD_KAFKA_RESP_ERR_UNKNOWN_MEMBER_ID:
+        case RD_KAFKA_RESP_ERR_FENCED_INSTANCE_ID:
                 actions |= RD_KAFKA_ERR_ACTION_PERMANENT;
                 break;
 
@@ -1538,6 +1545,8 @@ rd_kafka_txn_send_TxnOffsetCommitRequest (rd_kafka_broker_t *rkb,
         rd_kafka_buf_t *rkbuf;
         int16_t ApiVersion;
         rd_kafka_pid_t pid;
+        const rd_kafka_consumer_group_metadata_t *cgmetadata =
+                rko->rko_u.txn.cgmetadata;
         int cnt;
 
         rd_kafka_rdlock(rk);
@@ -1555,7 +1564,7 @@ rd_kafka_txn_send_TxnOffsetCommitRequest (rd_kafka_broker_t *rkb,
         }
 
         ApiVersion = rd_kafka_broker_ApiVersion_supported(
-                rkb, RD_KAFKAP_TxnOffsetCommit, 0, 0, NULL);
+                rkb, RD_KAFKAP_TxnOffsetCommit, 0, 3, NULL);
         if (ApiVersion == -1) {
                 rd_kafka_op_destroy(rko);
                 return RD_KAFKA_RESP_ERR__UNSUPPORTED_FEATURE;
@@ -1575,13 +1584,23 @@ rd_kafka_txn_send_TxnOffsetCommitRequest (rd_kafka_broker_t *rkb,
         rd_kafka_buf_write_i64(rkbuf, pid.id);
         rd_kafka_buf_write_i16(rkbuf, pid.epoch);
 
+        if (ApiVersion >= 3) {
+                /* GenerationId */
+                rd_kafka_buf_write_i32(rkbuf, cgmetadata->generation_id);
+                /* MemberId */
+                rd_kafka_buf_write_str(rkbuf, cgmetadata->member_id, -1);
+                /* GroupInstanceId */
+                rd_kafka_buf_write_str(rkbuf, cgmetadata->group_instance_id,
+                                       -1);
+        }
+
         /* Write per-partition offsets list */
         cnt = rd_kafka_buf_write_topic_partitions(
                 rkbuf,
                 rko->rko_u.txn.offsets,
                 rd_true /*skip invalid offsets*/,
                 rd_true /*write offsets*/,
-                rd_false/*dont write Epoch*/,
+                ApiVersion >= 2 /*write Epoch (-1) */,
                 rd_true /*write Metadata*/);
 
         if (!cnt) {
@@ -1809,7 +1828,7 @@ rd_kafka_txn_op_send_offsets_to_transaction (rd_kafka_t *rk,
                 rk->rk_eos.txn_coord,
                 rk->rk_conf.eos.transactional_id,
                 pid,
-                rko->rko_u.txn.group_id,
+                rko->rko_u.txn.cgmetadata->group_id,
                 errstr, sizeof(errstr),
                 RD_KAFKA_REPLYQ(rk->rk_ops, 0),
                 rd_kafka_txn_handle_AddOffsetsToTxn,
@@ -1866,7 +1885,8 @@ rd_kafka_send_offsets_to_transaction (
         rko = rd_kafka_op_new_cb(rk, RD_KAFKA_OP_TXN,
                                  rd_kafka_txn_op_send_offsets_to_transaction);
         rko->rko_u.txn.offsets = valid_offsets;
-        rko->rko_u.txn.group_id = rd_strdup(cgmetadata->group_id);
+        rko->rko_u.txn.cgmetadata =
+                rd_kafka_consumer_group_metadata_dup(cgmetadata);
         if (timeout_ms > rk->rk_conf.eos.transaction_timeout_ms)
                 timeout_ms = rk->rk_conf.eos.transaction_timeout_ms;
         rko->rko_u.txn.abs_timeout = rd_timeout_init(timeout_ms);

@@ -778,6 +778,13 @@ For more on the use of transactions, see [Transactions in Apache Kafka](https://
 See [examples/transactions.c](examples/transactions.c) for an example
 transactional EOS application.
 
+**Warning**
+If the broker version is older than Apache Kafka 2.5.0 then one transactional
+producer instance per consumed input partition is required.
+For 2.5.0 and later a single producer instance may be used regardless of
+the number of input partitions.
+See KIP-447 for more information.
+
 
 ## Usage
 
@@ -1844,6 +1851,7 @@ The [Apache Kafka Implementation Proposals (KIPs)](https://cwiki.apache.org/conf
 | KIP-429 - Consumer: incremental rebalance protocol                       | 2.4.0                       | Supported                                                                                     |
 | KIP-430 - AdminAPI: return authorized operations in Describe.. responses | 2.3.0                       | Not supported                                                                                 |
 | KIP-436 - Start time in stats                                            | 2.3.0                       | Supported                                                                                     |
+| KIP-447 - Producer scalability for exactly once semantics                | 2.5.0                       | Supported                                                                                     |
 | KIP-455 - AdminAPI: Replica assignment                                   | 2.4.0 (WIP)                 | Not supported                                                                                 |
 | KIP-460 - AdminAPI: electPreferredLeader                                 | 2.4.0                       | Not supported                                                                                 |
 | KIP-464 - AdminAPI: defaults for createTopics                            | 2.4.0                       | Not supported                                                                                 |
@@ -1891,7 +1899,7 @@ release of librdkafka.
 | 6       | UpdateMetadata          | 5           | -                       |
 | 7       | ControlledShutdown      | 2           | -                       |
 | 8       | OffsetCommit            | 7           | 7                       |
-| 9       | OffsetFetch             | 5           | 1                       |
+| 9       | OffsetFetch             | 7           | 7                       |
 | 10      | FindCoordinator         | 2           | 2                       |
 | 11      | JoinGroup               | 5           | 5                       |
 | 12      | Heartbeat               | 3           | 3                       |
@@ -1910,7 +1918,7 @@ release of librdkafka.
 | 25      | AddOffsetsToTxn         | 1           | 0                       |
 | 26      | EndTxn                  | 1           | 1                       |
 | 27      | WriteTxnMarkers         | 0           | -                       |
-| 28      | TxnOffsetCommit         | 2           | 0                       |
+| 28      | TxnOffsetCommit         | 4           | 4                       |
 | 29      | DescribeAcls            | 1           | -                       |
 | 30      | CreateAcls              | 1           | -                       |
 | 31      | DeleteAcls              | 1           | -                       |

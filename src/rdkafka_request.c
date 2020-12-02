@@ -616,13 +616,18 @@ rd_kafka_handle_OffsetFetch (rd_kafka_t *rk,
         const int log_decode_errors = LOG_ERR;
         int32_t TopicArrayCnt;
         int64_t offset = RD_KAFKA_OFFSET_INVALID;
+        int16_t ApiVersion = rkbuf->rkbuf_reqhdr.ApiVersion;
         rd_kafkap_str_t metadata;
+        int retry_unstable = 0;
         int i;
         int actions;
         int seen_cnt = 0;
 
         if (err)
                 goto err;
+
+        if (ApiVersion >= 3)
+                rd_kafka_buf_read_throttle_time(rkbuf);
 
         if (!*offsets)
                 *offsets = rd_kafka_topic_partition_list_new(16);
@@ -648,10 +653,13 @@ rd_kafka_handle_OffsetFetch (rd_kafka_t *rk,
                         int32_t partition;
                         rd_kafka_toppar_t *rktp;
                         rd_kafka_topic_partition_t *rktpar;
+                        int32_t LeaderEpoch;
                         int16_t err2;
 
                         rd_kafka_buf_read_i32(rkbuf, &partition);
                         rd_kafka_buf_read_i64(rkbuf, &offset);
+                        if (ApiVersion >= 5)
+                                rd_kafka_buf_read_i32(rkbuf, &LeaderEpoch);
                         rd_kafka_buf_read_str(rkbuf, &metadata);
                         rd_kafka_buf_read_i16(rkbuf, &err2);
 
@@ -686,11 +694,13 @@ rd_kafka_handle_OffsetFetch (rd_kafka_t *rk,
 				rktpar->offset = offset;
                         rktpar->err = err2;
 
-                        rd_rkb_dbg(rkb, TOPIC, "OFFSETFETCH",
-                                   "OffsetFetchResponse: %s [%"PRId32"] "
-                                   "offset %"PRId64", metadata %d byte(s)",
-                                   topic_name, partition, offset,
-                                   RD_KAFKAP_STR_LEN(&metadata));
+                        rd_rkb_dbg(
+                                rkb, TOPIC, "OFFSETFETCH",
+                                "OffsetFetchResponse: %s [%"PRId32"] "
+                                "offset %"PRId64", metadata %d byte(s): %s",
+                                topic_name, partition, offset,
+                                RD_KAFKAP_STR_LEN(&metadata),
+                                rd_kafka_err2name(rktpar->err));
 
 			if (update_toppar && !err2 && rktp) {
 				/* Update toppar's committed offset */
@@ -698,6 +708,10 @@ rd_kafka_handle_OffsetFetch (rd_kafka_t *rk,
 				rktp->rktp_committed_offset = rktpar->offset;
 				rd_kafka_toppar_unlock(rktp);
 			}
+
+                        if (rktpar->err ==
+                            RD_KAFKA_RESP_ERR_UNSTABLE_OFFSET_COMMIT)
+                                retry_unstable++;
 
 
                         if (rktpar->metadata)
@@ -714,6 +728,15 @@ rd_kafka_handle_OffsetFetch (rd_kafka_t *rk,
                 }
         }
 
+        if (ApiVersion >= 2) {
+                int16_t ErrorCode;
+                rd_kafka_buf_read_i16(rkbuf, &ErrorCode);
+                if (ErrorCode) {
+                        err = ErrorCode;
+                        goto err;
+                }
+        }
+
 
  err:
         if (!*offsets)
@@ -721,9 +744,11 @@ rd_kafka_handle_OffsetFetch (rd_kafka_t *rk,
                            "OffsetFetch returned %s", rd_kafka_err2str(err));
         else
                 rd_rkb_dbg(rkb, TOPIC, "OFFFETCH",
-                           "OffsetFetch for %d/%d partition(s) returned %s",
+                           "OffsetFetch for %d/%d partition(s) "
+                           "(%d unstable partition(s)) returned %s",
                            seen_cnt,
-                           (*offsets)->cnt, rd_kafka_err2str(err));
+                           (*offsets)->cnt,
+                           retry_unstable, rd_kafka_err2str(err));
 
         actions = rd_kafka_err_action(rkb, err, request,
 				      RD_KAFKA_ERR_ACTION_END);
@@ -735,7 +760,7 @@ rd_kafka_handle_OffsetFetch (rd_kafka_t *rk,
 				 RD_KAFKA_OP_COORD_QUERY, err);
         }
 
-        if (actions & RD_KAFKA_ERR_ACTION_RETRY) {
+        if (actions & RD_KAFKA_ERR_ACTION_RETRY || retry_unstable) {
                 if (rd_kafka_buf_retry(rkb, request))
                         return RD_KAFKA_RESP_ERR__IN_PROGRESS;
                 /* FALLTHRU */
@@ -798,7 +823,8 @@ void rd_kafka_op_handle_OffsetFetch (rd_kafka_t *rk,
                                                   rd_false/*dont update rktp*/,
                                                   rd_false/*dont add part*/);
                 if (err == RD_KAFKA_RESP_ERR__IN_PROGRESS) {
-                        rd_kafka_topic_partition_list_destroy(offsets);
+                        if (offsets)
+                                rd_kafka_topic_partition_list_destroy(offsets);
                         return; /* Retrying */
                 }
         }
@@ -826,14 +852,18 @@ void rd_kafka_op_handle_OffsetFetch (rd_kafka_t *rk,
  * Any partition with a usable offset will be ignored, if all partitions
  * have usable offsets then no request is sent at all but an empty
  * reply is enqueued on the replyq.
+ *
+ * @param require_stable Whether broker should return unstable offsets
+ *                       (not yet transaction-committed).
  */
 void rd_kafka_OffsetFetchRequest (rd_kafka_broker_t *rkb,
-                                  int16_t api_version,
                                   rd_kafka_topic_partition_list_t *parts,
+                                  rd_bool_t require_stable,
 				  rd_kafka_replyq_t replyq,
                                   rd_kafka_resp_cb_t *resp_cb,
                                   void *opaque) {
 	rd_kafka_buf_t *rkbuf;
+        int16_t ApiVersion;
         size_t of_TopicCnt;
         int TopicCnt = 0;
         ssize_t of_PartCnt = -1;
@@ -841,6 +871,11 @@ void rd_kafka_OffsetFetchRequest (rd_kafka_broker_t *rkb,
         int PartCnt = 0;
 	int tot_PartCnt = 0;
         int i;
+
+        ApiVersion = rd_kafka_broker_ApiVersion_supported(
+                rkb,
+                RD_KAFKAP_OffsetFetch,
+                0, 7, NULL);
 
         rkbuf = rd_kafka_buf_new_request(
                 rkb, RD_KAFKAP_OffsetFetch, 1,
@@ -902,11 +937,15 @@ void rd_kafka_OffsetFetchRequest (rd_kafka_broker_t *rkb,
         /* Finalize TopicCnt */
         rd_kafka_buf_update_u32(rkbuf, of_TopicCnt, TopicCnt);
 
-        rd_kafka_buf_ApiVersion_set(rkbuf, api_version, 0);
+        if (ApiVersion >= 7)
+                /* RequireStable */
+                rd_kafka_buf_write_bool(rkbuf, require_stable);
+
+        rd_kafka_buf_ApiVersion_set(rkbuf, ApiVersion, 0);
 
 	rd_rkb_dbg(rkb, TOPIC, "OFFSET",
 		   "OffsetFetchRequest(v%d) for %d/%d partition(s)",
-                   api_version, tot_PartCnt, parts->cnt);
+                   ApiVersion, tot_PartCnt, parts->cnt);
 
 	if (tot_PartCnt == 0) {
 		/* No partitions needs OffsetFetch, enqueue empty

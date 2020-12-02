@@ -9,6 +9,9 @@ and the sticky consumer group partition assignor.
  * Sticky producer partitioning (`sticky.partitioning.linger.ms`) -
    achieves higher throughput and lower latency through sticky selection
    of random partition.
+ * KIP-447: Producer scalability for exactly once semantics - allows
+   a single transactional producer to be used for multiple input partitions.
+   Requires Apache Kafka 2.5 or later.
 
 
 ## Upgrade considerations
@@ -19,6 +22,10 @@ and the sticky consumer group partition assignor.
    they are now partitioned to a single partition for the duration of the
    sticky time (10 milliseconds by default) before a new random sticky
    partition is selected.
+ * The new KIP-447 transactional producer scalability guarantees are only
+   supported on Apache Kafka 2.5 or later, on earlier releases you will
+   need to use one producer per input partition for EOS. This limitation
+   is not enforced by the producer or broker.
 
 
 ## Enhancements
@@ -52,6 +59,7 @@ and the sticky consumer group partition assignor.
    cgrp states (@gridaphobe, #3127).
  * Fix possible null dereference in `Message::errstr()` (#3140).
  * Partition fetch state was not set to STOPPED if OffsetCommit failed.
+
 
 # librdkafka v1.5.2
 
